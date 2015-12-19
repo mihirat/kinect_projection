@@ -245,7 +245,7 @@ void smoothing(vector< vector<double> >& postraj, int window)
 			smoothed[l][d] = current / window;
 		}
 	}
-	
+	postraj = smoothed;
 }
 
 void changePos2Angle(vector< vector<double> >& postraj)
@@ -319,7 +319,7 @@ int main(int argc, char **argv)
 
 	int dims = 14;
 	double dt = 0.1;
-	int window = 10;
+	int window = 5;
 
 	// pr2 joint names
 	string jnames[] = {"l_shoulder_pan_joint", "l_shoulder_lift_joint", "l_upper_arm_roll_joint", "l_elbow_flex_joint", "l_forearm_roll_joint", "l_wrist_flex_joint", "l_wrist_roll_joint", "r_shoulder_pan_joint", "r_shoulder_lift_joint", "r_upper_arm_roll_joint", "r_elbow_flex_joint", "r_forearm_roll_joint", "r_wrist_flex_joint", "r_wrist_roll_joint"};
@@ -379,10 +379,10 @@ int main(int argc, char **argv)
 			
 			traj_both.pop_back();
 			
-			smoothing(traj_both,window);
+			// something wrong
+			//~ smoothing(traj_both,window);
 			changePos2Angle(traj_both);
 			modifyCoordinate(traj_both);
-			smoothing(traj_both,window);
 			
 			int len = traj_both.size();
 			cout << "loaded trajectory length is " << len << endl;						

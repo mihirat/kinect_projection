@@ -1,4 +1,0 @@
-<launch>
-	<node name="motion_transfer" pkg="motion_transfer_manager" type="motion_transfer_manager" respawn="false" output="screen"/>
-	<node name="motion_saver" pkg="motion_transfer_manager" type="motion_data_saver" respawn="false" output="screen"/>
-</launch>

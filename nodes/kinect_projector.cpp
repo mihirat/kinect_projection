@@ -35,6 +35,40 @@
 
 using namespace std;
 
+
+
+bool loadCSV(const string filename, vector< vector<double> >& table, const char delimiter = ',')
+{
+    // open file
+    fstream filestream(filename.c_str());
+    if (!filestream.is_open())
+    {
+        //if failed, finish
+        return false;
+    }
+    // load file contents
+    while (!filestream.eof())
+    {
+        // read 1 line
+        string buffer;
+        filestream >> buffer;
+       
+        string::size_type sz;
+        //separate and add to list
+        vector<double> record;              
+        istringstream streambuffer(buffer);  
+        string token;                        
+        while (getline(streambuffer, token, delimiter))
+        {
+			double value = atof(token.c_str());
+            record.push_back(value);
+        }  
+        table.push_back(record);
+    }
+    return true;
+}
+
+
 void diffTraj(vector< vector<double> >& traj, vector< vector<double> >& diffedtraj, double dt)
 {
 	for (int i=0;i<traj.size()-1;i++){
@@ -50,8 +84,9 @@ void diffTraj(vector< vector<double> >& traj, vector< vector<double> >& diffedtr
 	}
 	vector<double> last = diffedtraj.back();
 	
+	// pseudo
 	for(int j= 0;j<last.size();j++){
-		double value = last[j] /2;
+		double value = last[j] /4;
 		last[j] = value;
 	}
 	diffedtraj.push_back(last);
@@ -134,6 +169,126 @@ void vector2moveit(vector< vector<double> >& traj, moveit_msgs::RobotTrajectory&
 	state.multi_dof_joint_state = multi_initPoint;
 }
 
+double AngleBetweenTwoVectors(vector<double> vecA, vector<double> vecB)
+{
+	double inner = vecA[0] * vecB[0] + vecA[1] * vecB[1] + vecA[2] * vecB[2];
+	double sqrtA = sqrt(vecA[0] * vecA[0] + vecA[1] * vecA[1] + vecA[2] * vecA[2]);
+	double sqrtB = sqrt(vecB[0] * vecB[0] + vecB[1] * vecB[1] + vecB[2] * vecB[2]);
+	double cos = inner / (sqrtA * sqrtB);
+	return double(acos(cos));	
+}
+
+vector<double> getAngles(vector<double> pos)
+{
+	vector<double> angle;
+	double x = pos[0];
+	double y = pos[1];
+	double z = pos[2];
+	
+	double r = sqrt(x*x + y*y + z*z);
+	double t = atan2(y,x);
+	double p = acos(z/r);
+	angle.push_back(t);
+	angle.push_back(p);
+	return angle;
+}
+
+vector<double> getDegsElbow(const vector<double>& pos){
+
+	vector<double> degs;
+	vector<double> Lsh2el,Lel2hand,Rsh2el,Rel2hand;
+
+	for(int i=0;i<3;i++){
+		Lsh2el.push_back(pos[3+i]-pos[0+i]);
+		Lel2hand.push_back(pos[6+i]-pos[3+i]);
+		Rsh2el.push_back(pos[12+i]-pos[9+i]);
+		Rel2hand.push_back(pos[15+i]-pos[12+i]);
+	}
+
+	double degL = AngleBetweenTwoVectors(Lsh2el, Lel2hand);	
+	double degR = AngleBetweenTwoVectors(Rsh2el, Rel2hand);
+	
+	degs.push_back(degL);
+	degs.push_back(degR);
+	return degs;
+}
+
+vector<double> getDegsShoulder(const vector<double>& pos){
+
+	vector<double> degs;
+	vector<double> Lsh2el, Rsh2el;
+	for(int i=0;i<3;i++){
+		Lsh2el.push_back(pos[3+i]-pos[0+i]);
+		Rsh2el.push_back(pos[12+i]-pos[9+i]);
+	}
+	vector<double> degsL = getAngles(Lsh2el);
+	vector<double> degsR = getAngles(Rsh2el);
+	
+	degs.push_back(degsL[0]);
+	degs.push_back(degsL[1]);
+	degs.push_back(degsR[0]);
+	degs.push_back(degsR[1]);
+	return degs;
+}
+
+void smoothing(vector< vector<double> >& postraj, int window)
+{
+	vector< vector<double> > smoothed = postraj;
+	int dim = postraj[0].size();
+	for(int d=0;d<dim;d++){
+		for(int l=0;l<postraj.size()-window;l++){
+
+			int current = 0;
+			for(int w=0;w<window;w++){
+				current = current + postraj[l+w][d];
+			}
+			smoothed[l][d] = current / window;
+		}
+	}
+	
+}
+
+void changePos2Angle(vector< vector<double> >& postraj)
+{
+	vector< vector<double> > angletraj;
+	for(int i=0;i<postraj.size();i++){
+		vector<double> tmp = postraj[i];
+		vector<double> degs_elbow = getDegsElbow(tmp);
+		vector<double> degs_shoulder = getDegsShoulder(tmp);
+		vector<double> eefangles(3,0.0);
+		degs_shoulder.insert(degs_shoulder.begin() + 2, degs_elbow[0]);
+		degs_shoulder.insert(degs_shoulder.begin() + 2, 0.0);
+		degs_shoulder.insert(degs_shoulder.begin() + 4, eefangles.begin(),eefangles.end());
+		degs_shoulder.push_back(0.0);
+		degs_shoulder.push_back(degs_elbow[1]);
+		degs_shoulder.insert(degs_shoulder.end(), eefangles.begin(),eefangles.end());
+
+		angletraj.push_back(degs_shoulder);
+	}
+	postraj = angletraj;
+}
+
+
+void modifyCoordinate(vector< vector<double> >& traj)
+{
+	vector<double> modvalues(2, 0.0);
+	modvalues[0] = -1.57; // shoulder x-y
+	modvalues[1] = 3.14; // shoulder z
+	
+	for(int i=0;i<traj.size();i++){
+		vector<double> tmp = traj[i];
+
+		for(int k=0;k<tmp.size();k++){
+			tmp[k] = - tmp[k];
+		}
+		for(int k=0;k<2;k++){
+			tmp[k] = tmp[k] + modvalues[k];
+			tmp[k+7] = tmp[k+7] + modvalues[k];
+		}
+		traj[i] = tmp;
+	}
+}
+
 
 void executePathRequest(ros::ServiceClient client, moveit_msgs::RobotTrajectory& traj, bool wfe)
 {
@@ -147,59 +302,6 @@ void executePathRequest(ros::ServiceClient client, moveit_msgs::RobotTrajectory&
 	}else
 	{
 		cout << "Failed path execution. something wrong..." << endl;
-	}
-}
-
-
-bool loadCSV(const string filename, vector< vector<double> >& table, const char delimiter = ',')
-{
-    // open file
-    fstream filestream(filename.c_str());
-    if (!filestream.is_open())
-    {
-        //if failed, finish
-        return false;
-    }
-    // load file contents
-    while (!filestream.eof())
-    {
-        // read 1 line
-        string buffer;
-        filestream >> buffer;
-       
-        string::size_type sz;
-        //separate and add to list
-        vector<double> record;              
-        istringstream streambuffer(buffer);  
-        string token;                        
-        while (getline(streambuffer, token, delimiter))
-        {
-			double value = atof(token.c_str());
-            record.push_back(value);
-        }  
-        table.push_back(record);
-    }
-    return true;
-}
-
-void modifyCoordinate(vector< vector<double> >& traj)
-{
-	vector<double> modvalues(2, 0.0);
-	modvalues[0] = -1.57; // shoulder x-y
-	modvalues[1] = 3.14; // shoulder z
-	//~ modvalues[3] = 0; // elbow
-	
-	for(int i=0;i<traj.size();i++){
-		vector<double> tmp = traj[i];
-
-		for(int k=0;k<tmp.size();k++){
-			tmp[k] = - tmp[k];
-		}
-		for(int k=0;k<2;k++){
-			tmp[k] = tmp[k] + modvalues[k];
-			tmp[k+7] = tmp[k+7] + modvalues[k];
-		}
-		traj[i] = tmp;
 	}
 }
 
@@ -217,6 +319,7 @@ int main(int argc, char **argv)
 
 	int dims = 14;
 	double dt = 0.1;
+	int window = 10;
 
 	// pr2 joint names
 	string jnames[] = {"l_shoulder_pan_joint", "l_shoulder_lift_joint", "l_upper_arm_roll_joint", "l_elbow_flex_joint", "l_forearm_roll_joint", "l_wrist_flex_joint", "l_wrist_roll_joint", "r_shoulder_pan_joint", "r_shoulder_lift_joint", "r_upper_arm_roll_joint", "r_elbow_flex_joint", "r_forearm_roll_joint", "r_wrist_flex_joint", "r_wrist_roll_joint"};
@@ -235,7 +338,7 @@ int main(int argc, char **argv)
 			vector< vector<double> >  traj_both;
 
 			// load .csv			
-			cout<<"which motion? (0: hadouken, 1: jojo, 2: boxing, 3: banzai, 4: wish, 5: compose)"<<endl;
+			cout<<"which motion? (1: jojo, 2: boxing, 3: conduct)"<<endl;
 			int lequel;
 			cin >> lequel;
 			string filename;
@@ -245,12 +348,26 @@ int main(int argc, char **argv)
 					filename = ros::package::getPath("kinect_projection") + "/data/hadouken.csv";
 					break;
 				}
-				default:
+				case 1:
 				{
-					filename = ros::package::getPath("kinect_projection") + "/data/kinect.csv";
+					filename = ros::package::getPath("kinect_projection") + "/data/jojo.csv";
 					break;
 				}
-								
+				case 2:
+				{
+					filename = ros::package::getPath("kinect_projection") + "/data/boxing.csv";
+					break;
+				}
+				case 3:
+				{
+					filename = ros::package::getPath("kinect_projection") + "/data/conduct.csv";
+					break;
+				}
+				default:
+				{
+					filename = ros::package::getPath("kinect_projection") + "/data/jojo.csv";
+					break;
+				}								
 			}
 			
 			bool status = false;
@@ -261,7 +378,11 @@ int main(int argc, char **argv)
 			}
 			
 			traj_both.pop_back();
+			
+			smoothing(traj_both,window);
+			changePos2Angle(traj_both);
 			modifyCoordinate(traj_both);
+			smoothing(traj_both,window);
 			
 			int len = traj_both.size();
 			cout << "loaded trajectory length is " << len << endl;						
@@ -278,13 +399,19 @@ int main(int argc, char **argv)
 				char answer;
 				cin >> answer;
 				if (answer == 'y'){
+					// visualize planned path
 					display_trajectory.trajectory_start = state;
 					display_trajectory.trajectory.push_back(moveit_traj);
 					display_publisher.publish(display_trajectory);
 								
-					ros::Duration(len*dt).sleep();
+					ros::Duration(len*dt/2).sleep();
+					// execute the path
 					executePathRequest(ExecutePath_client, moveit_traj, wait_for_execution);		
-				}			
+				}
+				else{
+					cout << "finish process... " << endl;
+					return 0;
+				}
 			}
 		}
 		else{

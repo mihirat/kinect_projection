@@ -81,7 +81,7 @@ void vector2moveit(vector< vector<double> >& traj, moveit_msgs::RobotTrajectory&
 	vector<trajectory_msgs::JointTrajectoryPoint> points;
 	vector<double> empty;
 	
-	// calc acceleraton from velocities
+	// calc acceleraton and velocity 
 	vector< vector<double> > vel, accel; 
 	diffTraj(traj, vel, dt);
 	diffTraj(vel, accel, dt);

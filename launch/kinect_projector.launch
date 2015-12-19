@@ -1,0 +1,3 @@
+<launch>
+	<node name="kinect_projector" pkg="kinect_projection" type="kinect_projector.cpp" respawn="false" output="screen"/>
+/launch>

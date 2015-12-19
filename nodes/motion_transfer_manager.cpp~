@@ -1,0 +1,578 @@
+#include "ros/ros.h"
+#include <dmp/dmp.h>
+#include <lpa_gmm_ros/lpa_gmm.h>
+#include <iostream>
+#include "motion_transfer_manager/traj.h"
+
+#include <fstream>
+#include <sstream> 
+
+
+dmp::LearnDMPFromDemo makePbDRequest(ros::ServiceClient client, int dims, 
+	std::vector< std::vector<double> >& traj, double dt, double K, double D, int num_bases)
+{
+	std::vector<double> k_gains,d_gains;
+	int num_traj = traj.size();
+	int dof;
+	dmp::LearnDMPFromDemo srv;
+
+	std::cout << "accessing to learn..." << std::endl;
+
+	if (num_traj != 0){
+		dof = traj[0].size();
+		std::cout << "start learning..." << std::endl;
+
+		dmp::DMPTraj demotraj = dmp::DMPTraj();
+
+		for (int i=0;i<num_traj;i++){
+			dmp::DMPPoint pt = dmp::DMPPoint();
+			pt.positions = traj[i];
+			demotraj.points.push_back(pt);
+			demotraj.times.push_back(dt*i);
+		}
+
+		for (int i=0;i<dims;i++){
+			k_gains.push_back(K);
+			d_gains.push_back(D);
+		}
+				
+		srv.request.demo = demotraj;
+		srv.request.k_gains = k_gains;
+		srv.request.d_gains = d_gains;
+		srv.request.num_bases = num_bases;
+
+		if(client.call(srv))
+		{
+			std::cout << "success learn_dmp_from_demo!" << std::endl;
+		}else
+		{
+			std::cout << "Failed at learn_dmp_from_demo!" << std::endl;
+		}//~ 
+
+	}
+	return srv;
+
+}
+
+void makeSetActiveRequest(ros::ServiceClient client, std::vector<dmp::DMPData> dmplist)
+{
+	dmp::SetActiveDMP srv;
+	srv.request.dmp_list = dmplist;
+	
+	if(client.call(srv))
+	{
+		std::cout << "success setting as active!" << std::endl;
+	}else
+	{
+		std::cout << "Failed setting as active!" << std::endl;
+	}
+}
+
+
+dmp::GetDMPPlan makePlanRequest(ros::ServiceClient client, std::vector<double> x0, std::vector<double> xd0, double t0,
+std::vector<double> goal, std::vector<double> goal_thres, double seg_length, double tau, double dt, int integrate)
+{
+	std::cout << "starting DMP planning..." << std::endl;
+
+	dmp::GetDMPPlan srv;
+
+	srv.request.x_0 = x0;
+	srv.request.x_dot_0 = xd0;
+	srv.request.t_0 = t0;
+	srv.request.goal = goal;
+	srv.request.goal_thresh = goal_thres;
+	srv.request.seg_length = seg_length;
+	srv.request.tau= tau;
+	srv.request.dt= dt;
+	srv.request.integrate_iter= integrate;
+
+	if(client.call(srv))
+	{
+		std::cout << "success dmp planning!" << std::endl;
+	}else
+	{
+		std::cout << "Failed dmp planning!" << std::endl;
+	}
+
+	return srv;
+}
+
+
+void vel2accel(dmp::DMPTraj& traj, std::vector< std::vector<double> >& accels, double dt)
+{
+	for (int i=0;i<traj.times.size()-1;i++){
+		std::vector<double> tmp, tmp2, acc;
+		tmp = traj.points[i].velocities;
+		tmp2 = traj.points[i+1].velocities;
+
+		for(int j= 0;j<tmp.size();j++){
+			double value = (tmp2[j] - tmp[j]) / dt;
+			acc.push_back(value);
+		}
+		accels.push_back(acc);
+	}
+	std::vector<double> acc = accels.back();
+	
+	for(int j= 0;j<acc.size();j++){
+		double value = acc[j] /2;
+		acc[j] = value;
+	}
+	
+	accels.push_back(acc);
+}
+
+void dmp2moveit(dmp::DMPTraj& traj, moveit_msgs::RobotTrajectory& moveit_traj, moveit_msgs::RobotState& state, double dt, std::vector<std::string> joint_names)
+{
+	trajectory_msgs::JointTrajectory joint_traj = trajectory_msgs::JointTrajectory();
+	trajectory_msgs::MultiDOFJointTrajectory multi_joint_traj;
+	sensor_msgs::JointState initPoint;
+	sensor_msgs::MultiDOFJointState multi_initPoint;
+	
+	// set parameters to header for joint trajectory
+	std_msgs::Header header = std_msgs::Header();
+	int seq = 0;
+	int sec = 0;
+	int nsec = 0;
+	// for baxter
+	//~ std::string frame_id = "/base";
+	// for pr2 
+	std::string frame_id = "/odom_combined";
+	ros::Time stamp(sec);
+	stamp.sec = sec;
+	stamp.nsec = nsec;
+	header.seq = seq;
+	header.stamp = stamp;
+	header.frame_id = frame_id;
+	
+	// for baxter
+	//~ std::string jnames[] = {"left_s0", "left_s1", "left_e0", "left_e1", "left_w0", "left_w1", "left_w2", "right_s0", "right_s1", "right_e0", "right_e1", "right_w0", "right_w1", "right_w2"};
+	// for pr2
+	
+	std::vector<trajectory_msgs::JointTrajectoryPoint> points;
+	std::vector<double> empty;
+	
+	// calc acceleraton from velocities
+	std::vector< std::vector<double> > accels; 
+	vel2accel(traj, accels, dt);
+	
+	
+	for(int i=0;i<traj.times.size();i++){
+		trajectory_msgs::JointTrajectoryPoint point = trajectory_msgs::JointTrajectoryPoint();
+		point.positions = traj.points[i].positions;
+		point.velocities = traj.points[i].velocities;
+		point.accelerations = accels[i];
+		point.effort = empty;
+		double time = traj.times[i];
+		ros::Duration tfs(time);
+		point.time_from_start = tfs;
+		
+		points.push_back(point);		
+	}
+	std::vector<double>  initPos, initVel; 
+	initPos = traj.points[0].positions;
+	initVel = traj.points[0].velocities;
+	
+	
+	// set parameters to joint trajectory
+	joint_traj.header = header;
+	joint_traj.joint_names = joint_names;
+	joint_traj.points = points;	
+	
+	// set parameters to multi dof joint trajectory
+	frame_id = "";
+	header.frame_id = frame_id;
+	std::vector<std::string> empty_s;
+	std::vector<trajectory_msgs::MultiDOFJointTrajectoryPoint> empty_multipoints;
+
+	multi_joint_traj.header = header;
+	multi_joint_traj.joint_names = empty_s;
+	multi_joint_traj.points = empty_multipoints;
+	
+	moveit_traj.joint_trajectory = joint_traj;
+	moveit_traj.multi_dof_joint_trajectory = multi_joint_traj;	
+	
+	// set vaiables to state
+	initPoint.header = header;
+	initPoint.name = joint_names;
+	initPoint.position = initPos;
+	initPoint.velocity = initVel;
+	initPoint.effort = empty;
+	
+	multi_initPoint.header = header;
+	multi_initPoint.joint_names = empty_s;
+		
+	state.joint_state = initPoint;
+	state.multi_dof_joint_state = multi_initPoint;
+}
+
+
+void executePathRequest(ros::ServiceClient client, moveit_msgs::RobotTrajectory& traj, bool wfe)
+{
+	moveit_msgs::ExecuteKnownTrajectory srv;
+	srv.request.trajectory = traj;
+	srv.request.wait_for_execution = wfe;
+	
+	if(client.call(srv))
+	{
+		std::cout << "!!Execute Path!!" << std::endl;
+	}else
+	{
+		std::cout << "Failed path execution!" << std::endl;
+	}
+}
+
+
+bool loadCSV(const std::string filename, std::vector< std::vector<double> >& table, const char delimiter = ',')
+{
+    // open file
+    std::fstream filestream(filename.c_str());
+    if (!filestream.is_open())
+    {
+        //if failed, finish
+        return false;
+    }
+    // load file contents
+    while (!filestream.eof())
+    {
+        // read 1 line
+        std::string buffer;
+        filestream >> buffer;
+       
+        std::string::size_type sz;
+        //separate and add to list
+        std::vector<double> record;              // 
+        std::istringstream streambuffer(buffer); // 
+        std::string token;                       // 
+        while (getline(streambuffer, token, delimiter))
+        {
+			double value = std::atof(token.c_str());
+            record.push_back(value);
+        }  
+        table.push_back(record);
+    }
+    return true;
+}
+
+void compressCSV(std::vector< std::vector<double> >& traj, int length, int start){
+	std::vector< std::vector<double> > traj_compressed;
+
+	int length_orig = traj.size();
+	int ratio = length_orig / length;
+	
+	for (int i=0;i<length;i++){
+		//~ std::vector<double> tmp = traj[ratio * i];
+		std::vector<double> tmp = traj[start + 3*i];
+		traj_compressed.push_back(tmp);	
+	}
+	traj = traj_compressed;
+	
+}
+
+void modifyCoordinate(std::vector< std::vector<double> >& traj){
+	std::vector<double> modvalues(2, 0.0);
+	modvalues[0] = -1.57; // shoulder x-y
+	modvalues[1] = 3.14; // shoulder z
+	//~ modvalues[3] = 0; // elbow
+	
+	std::cout << "tmp length is " << traj.size() << std::endl;
+	for(int i=0;i<traj.size()-1;i++){
+		std::vector<double> tmp = traj[i];
+
+		for(int k=0;k<tmp.size();k++){
+			tmp[k] = - tmp[k];
+		}
+		for(int k=0;k<2;k++){
+			tmp[k] = tmp[k] + modvalues[k];
+			tmp[k+7] = tmp[k+7] + modvalues[k];
+		}
+		traj[i] = tmp;
+	}
+}
+
+void arma2vector(arma::mat& arma, std::vector< std::vector<double> >& resvec){
+	
+	std::vector< std::vector<double> > vec2d;
+	
+	for(int i=0;i<arma.n_rows;i++){
+		std::vector<double> vec;
+		for(int j=0;j<arma.n_cols;j++){
+			vec.push_back(arma(i,j));
+		}
+		vec2d.push_back(vec);
+	}
+	resvec = vec2d;
+}
+
+
+int main(int argc, char **argv)
+{
+
+	ros::init(argc, argv, "motion_transfer_manager");
+	ros::NodeHandle n;
+	// set dmp clients
+	ros::ServiceClient PbD_client = n.serviceClient<dmp::LearnDMPFromDemo>("learn_dmp_from_demo");
+	ros::ServiceClient SetActive_client = n.serviceClient<dmp::SetActiveDMP>("set_active_dmp");
+	ros::ServiceClient Plan_client = n.serviceClient<dmp::GetDMPPlan>("get_dmp_plan");
+	// set  transfer client
+	ros::ServiceClient transfer_client = n.serviceClient<lpa_gmm_ros::transferTraj>("/transfer_3DoF/transfer_traj_3DoF");
+
+
+	// dmp parameters
+	std::vector< std::vector<double> >  traj_both;
+	int dims = 0;
+	double dt = 1.0;
+	double K = 100.0;
+	double D = K/4;
+	int num_bases = 10;
+
+	// choose robot to execute a path
+	std::cout<<"0: 3Dof arm, 1: pr2, 2 hiro"<<std::endl;
+	std::cout<<"which robot to execture a planned path? (0-2)"<<std::endl;
+	int rChoice, armChoice;
+	std::cin >> rChoice;
+	
+	if(rChoice == 1){
+		std::cout<<"arms?(0:both, 1:left, 2:right)"<<std::endl;
+		std::cin >> armChoice;
+		if(armChoice == 0){rChoice = 1;}
+		else if(armChoice == 1){rChoice = 2;}
+		else if(armChoice == 2){rChoice = 3;}
+	}
+	else if(rChoice == 2){
+		std::cout<<"arms?(0:both, 1:left, 2:right)"<<std::endl;
+		std::cin >> armChoice;
+		if(armChoice == 0){rChoice = 4;}
+		else if(armChoice == 1){rChoice = 5;}
+		else if(armChoice == 2){rChoice = 6;}
+	}
+	
+
+	// robot description is commonly used
+	robot_model_loader::RobotModelLoader robot_model_loader("robot_description");
+	robot_model::RobotModelPtr kinematic_model = robot_model_loader.getModel();
+
+	// to transfer
+	robot_state::RobotStatePtr kinematic_state(new robot_state::RobotState(kinematic_model));
+	kinematic_state->setToDefaultValues();
+	std::vector<std::string> joint_names;
+	std::string arm_name1, arm_name2;
+
+	//Edited by Ndivhuwo.
+	// KDL tree
+	KDL::Tree robot;
+	std::string robot_desc_string;
+	n.param("robot_description", robot_desc_string, std::string());
+	if (!kdl_parser::treeFromString(robot_desc_string, robot)){
+		ROS_ERROR("Failed to construct kdl tree");
+		return false;
+	}
+	// End.
+	switch(rChoice){
+		case 0: // 3dof arms
+		{
+			//~ const robot_state::JointModelGroup* source_arm_group = kinematic_model->getJointModelGroup("source_arm");
+			//~ const robot_state::JointModelGroup* target_arm_group = kinematic_model->getJointModelGroup("target_arm");
+			arm_name1 = "source_arm";
+			arm_name2 = "target_arm";
+
+			// Edited by Ndivhuwo.
+			//std::string jnames[] = {"T_joint1", "T_joint_inv", "T_joint2"};
+			std::string jnames[] = {"T_shoulder_joint", "T_joint1", "T_joint2"};
+			// End.
+
+			dims = 3;
+			std::vector<std::string> jnames_vec(jnames, jnames + dims);
+			joint_names = jnames_vec;
+			break;
+		}
+		case 1: // pr2
+		{
+			arm_name1 = "arms";
+			arm_name2 = arm_name1;
+			std::string jnames[] = {"l_shoulder_pan_joint", "l_shoulder_lift_joint", "l_upper_arm_roll_joint", "l_elbow_flex_joint", "l_forearm_roll_joint", "l_wrist_flex_joint", "l_wrist_roll_joint", "r_shoulder_pan_joint", "r_shoulder_lift_joint", "r_upper_arm_roll_joint", "r_elbow_flex_joint", "r_forearm_roll_joint", "r_wrist_flex_joint", "r_wrist_roll_joint"};
+			dims = 14;
+			std::vector<std::string> jnames_vec(jnames, jnames + dims);
+			joint_names = jnames_vec;
+			break;
+		}
+		case 2: // pr2
+		{
+			arm_name1 = "left_arm";
+			arm_name2 = arm_name1;
+			dims = 7;
+			break;
+		}
+		case 3: // pr2
+		{
+			arm_name1 = "right_arm";
+			arm_name2 = arm_name1;
+			dims = 7;
+			break;
+		}
+		//~ case 20: // hiro
+			//~ const robot_state::JointModelGroup* source_arm_group = kinematic_model->getJointModelGroup("left_arm");
+			//~ const robot_state::JointModelGroup* target_arm_group = kinematic_model->getJointModelGroup("right_arm");
+			//~ traj_data data1(kinematic_model, "left_arm", "right_arm");
+			//~ dims = 6;
+			//~ break;
+		default:
+		{
+			std::cout << "you have chosen something wrong." << std::endl;
+			return 0;
+			break;
+		}
+	}
+	// Edited by Ndivhuwo.
+	//traj_data data1(kinematic_model, arm_name1, arm_name2);
+	traj_data data1(kinematic_model, robot, arm_name1, arm_name2);
+	// End.
+	
+	// to transfer
+	lpa_gmm_ros::transferTraj traj;
+	ros::Subscriber sub = n.subscribe("/move_group/display_planned_path", 1000, &traj_data::Trajectory, &data1);
+
+	// prepare to show planned path
+	ros::Publisher display_publisher = n.advertise<moveit_msgs::DisplayTrajectory>("/move_group/display_planned_path", 1, true);
+	
+//////////////////  get trahectiry //////////////////////////////
+
+	ros::Rate loop_rate(10);
+	bool isFirst = true; // to avoid non-subscription problem
+
+	while (ros::ok())
+  	{
+		if(!isFirst){
+			std::cout<<std::endl<<"0: directly get traj from a robot, 1:load csv file from kinect, 2 csv from moveit"<<std::endl;
+			std::cout<<"which case as a source? (0-2)"<<std::endl;
+			int trajcase;
+			std::cin >> trajcase;
+
+			if(trajcase == 0){
+				traj = *(data1.getTransTraj());
+
+				if (transfer_client.call(traj)){
+					ROS_INFO("Successfully transferred...");
+					std::cout<<"Response information: "<<std::endl;
+					arma::mat gtest_traj = *(data1.getGroundThruth());
+					arma::mat test_traj(gtest_traj.n_rows, gtest_traj.n_cols, arma::fill::zeros);
+					for (size_t i=0; i<traj.response.joints.size(); ++i)
+					{
+						for (size_t j=0; j<traj.response.joints[i].positions.size(); ++j)
+						{
+							test_traj(i,j) = traj.response.joints[i].positions[j];
+						}
+						size_t dof = traj.response.joints[i].positions.size();
+							
+						test_traj(i,dof) = traj.response.end_effector[i].x;
+						test_traj(i,dof+1) = traj.response.end_effector[i].y;
+						test_traj(i,dof+2) = traj.response.end_effector[i].z;
+					}
+					std::cout<<"Transfer error: "<<sqrt(mean(sum(square(test_traj-gtest_traj),1)))<<std::endl;
+						
+					arma2vector(test_traj, traj_both);
+				}
+				else
+				{
+					ROS_ERROR("Failed to call service transfer_traj_3DoF");
+						//return 1;
+				}
+			}
+			else if (trajcase == 1){
+				// load .csv, assuming you are in "catkin_ws"
+				std::string filename = "src/motion_transfer/motion_transfer_manager/data/kinect.csv";
+				bool status = false;
+				status = loadCSV(filename, traj_both);
+				if(!status){
+					std::cout << "kinect csv loading failed. are you running in catkin_ws?" << std::endl;
+					return -1;
+				}
+				if(rChoice != 1){
+					std::cout << "kinect traj projection is only for both arms" << std::endl;
+					return -1;					
+				}
+				
+				modifyCoordinate(traj_both);
+				int compresslength = 100; // to extract some part of trajectory
+				int start = 100; // beginning point
+				compressCSV(traj_both, compresslength, start);
+				std::cout << "loaded trajectory length is " << traj_both.size() << std::endl;
+			}
+			else if (trajcase == 2){
+				// load .csv, assuming you are in "catkin_ws"
+				std::string filename = "src/motion_transfer/motion_transfer_manager/data/traj_hplus.csv";
+				bool status = false;
+				status = loadCSV(filename, traj_both);
+				if(!status){
+					std::cout << "moveit csv loading failed" << std::endl;
+					return -1;
+				}
+			}
+			
+
+			
+		/////////////  DMP  ///////////////////////////////////////
+
+			int len = traj_both.size();
+			if (len != 0){
+				// dmp encoding and set active
+				dmp::LearnDMPFromDemo learn_resp = makePbDRequest(PbD_client, dims, traj_both, dt, K, D, num_bases);
+				makeSetActiveRequest(SetActive_client, learn_resp.response.dmp_list);
+			
+				// set start and goal
+				std::vector<double> x0 = traj_both.front();
+				std::vector<double> goal = traj_both.back();
+				moveit_msgs::DisplayTrajectory display_trajectory;	
+								
+				if(learn_resp.response.tau != 0){ // to make sure display_planned_path started responding
+							
+					std::vector<double> xd0(dims, 0.0);
+					std::vector<double> goal_thres(dims, 0.1);					
+					double t0 = 0.0;
+					double seg_length = -1; // plan until convergence to goal
+					double tau = learn_resp.response.tau * 1;
+					//~ dt = 1.0;
+					int integrate = 10;
+						
+					// get dmp trajectory
+					dmp::GetDMPPlan plan_resp = makePlanRequest(Plan_client, x0, xd0, t0, goal, goal_thres, seg_length, tau, dt, integrate);
+					dmp::DMPTraj dmptraj = plan_resp.response.plan;
+									
+					moveit_msgs::RobotTrajectory moveit_traj;
+					moveit_msgs::RobotState state;
+					dmp2moveit(dmptraj, moveit_traj, state, dt, joint_names);
+
+					bool wait_for_execution = true;			
+					moveit_msgs::DisplayTrajectory display_trajectory;
+								
+					
+		//////////////////// execution ///////////////////////
+					std::cout<<"Execute transferred motion? (y/n)"<<std::endl;
+					char answer;
+					std::cin >> answer;
+					if (answer == 'y'){
+						display_trajectory.trajectory_start = state;
+						display_trajectory.trajectory.push_back(moveit_traj);
+						display_publisher.publish(display_trajectory);					
+								
+						std::cout <<  "!!!EXECUTION!!!" << std::endl;
+						ros::ServiceClient ExecutePath_client = n.serviceClient<moveit_msgs::ExecuteKnownTrajectory>("execute_kinematic_path");
+						executePathRequest(ExecutePath_client, moveit_traj, wait_for_execution);		
+					}			
+				}
+			}
+		}else{
+			ros::Duration(1.0).sleep();
+			isFirst = false;
+		}
+			
+		/**
+		* ros::spin() will enter a loop, pumping callbacks.  With this version, all
+		* callbacks will be called from within this thread (the main one).  ros::spin()
+		* will exit when Ctrl-C is pressed, or the node is shutdown by the master.
+		*/
+        ros::spinOnce();
+    	loop_rate.sleep();
+  	}
+
+	return 0;
+}

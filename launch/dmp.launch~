@@ -1,0 +1,4 @@
+<launch>
+	<node name="dmp_server" pkg="dmp" type="dmp_server" respawn="false" output="screen"/>
+	<node name="dmp_learner" pkg="dmp" type="dmp_learner" respawn="false" output="screen"/>
+</launch>

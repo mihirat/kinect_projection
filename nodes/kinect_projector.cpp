@@ -25,9 +25,6 @@
 #include <moveit/robot_state/conversions.h>
 #include <moveit_msgs/DisplayRobotState.h>
 
-// Kinematics
-#include <moveit_msgs/GetPositionIK.h>
-
 // execution
 #include <moveit_msgs/RobotTrajectory.h>
 #include <moveit_msgs/ExecuteKnownTrajectory.h>
@@ -262,6 +259,7 @@ int main(int argc, char **argv)
 				cout << "kinect csv loading failed." << endl;
 				return -1;
 			}
+			
 			traj_both.pop_back();
 			modifyCoordinate(traj_both);
 			
@@ -288,8 +286,6 @@ int main(int argc, char **argv)
 					executePathRequest(ExecutePath_client, moveit_traj, wait_for_execution);		
 				}			
 			}
-							cout << "2" << endl;						
-
 		}
 		else{
 			ros::Duration(1.0).sleep();
